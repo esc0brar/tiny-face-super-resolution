@@ -16,6 +16,7 @@ import cv2
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 import functools
+import torch.nn.functional as F
 
 # Configuration
 class Config:
@@ -28,7 +29,7 @@ class Config:
         self.scale_factor = 4  # 4x upscaling
         self.hr_size = 128  # High-resolution patch size
         self.lr_size = self.hr_size // self.scale_factor  # Low-resolution patch size
-        self.wider_face_path = "path/to/wider_face"  # Update this to your Wider Face dataset path
+        self.wider_face_path = "/Volumes/T7/Capstone/widerface"  # Update this to your Wider Face dataset path
         self.output_dir = "output"
         self.models_dir = os.path.join(self.output_dir, "models")
         self.sample_dir = os.path.join(self.output_dir, "samples")

@@ -1,9 +1,10 @@
 from ESRGAN_implemetation_tiny_face import Config, ESRGANTrainer, upscale_directory, train_with_face_focus
 
+
 # For training
 def run_training():
     config = Config()
-    config.wider_face_path = "C:\\coding\\transformer\\ESRGAN_Complete\\wider_face\\WIDER_test"
+    config.wider_face_path = "/Volumes/T7/Capstone/widerface"
     config.batch_size = 16
     config.num_epochs = 100
     config.lr = 2e-4
@@ -23,4 +24,5 @@ def run_upscaling():
     upscale_directory(model_path, input_dir, output_dir)
 
 # Choose which function to run
-run_training()  # or run_upscaling()
+if __name__ == "__main__":
+    run_training()  # or run_upscaling()

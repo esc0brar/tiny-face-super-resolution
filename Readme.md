@@ -1,12 +1,17 @@
 # ESRGAN for Wider Face Dataset
 
-This project implements ESRGAN (Enhanced Super-Resolution Generative Adversarial Network) for the Wider Face dataset. The implementation can be used to train a model that upscales face images with high fidelity, preserving details important for facial recognition.
+This project implements an ESRGAN (Enhanced Super-Resolution Generative Adversarial Network) based pipeline for the Wider Face dataset. The implementation can be used to train a model that upscales face images with high fidelity, preserving details important for facial recognition.
 
 ## Project Overview
 
 The implementation follows a two-stage approach:
 1. **Training Phase**: The model is trained using pairs of low-resolution (LR) and high-resolution (HR) images from the Wider Face dataset
 2. **Upscaling Phase**: The trained model is used to upscale images to 4x their original resolution
+
+## My Contributions
+- Designed and implemented the low-resolution data generation pipeline for training
+- Developed dataset loading pipeline for handling paired low- and high-resolution images  
+- Contributed to integration and debugging of the ESRGAN training pipeline  
 
 ## Requirements
 

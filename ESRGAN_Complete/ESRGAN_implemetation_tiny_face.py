@@ -1,26 +1,33 @@
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
-from PIL import Image
-import numpy as np
-from RRDBNet_arch import RRDBNet
+# Standard library
+import argparse
 import glob
 import json
-from tqdm import tqdm
+import os
 import random
-import argparse
+
+# Third-party
 import cv2
-from skimage.metrics import structural_similarity as ssim
-from skimage.metrics import peak_signal_noise_ratio as compare_psnr
-import functools
+import numpy as np
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
+from PIL import Image
+from skimage.metrics import peak_signal_noise_ratio as compare_psnr
+from skimage.metrics import structural_similarity as ssim
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from tqdm import tqdm
+
+# Local
+from RRDBNet_arch import RRDBNet
 
 # Configuration
 class Config:
+    """Container for training/inference hyperparameters and paths."""
+
     def __init__(self):
+        """Initialize default configuration values (no inputs, no outputs)."""
         self.batch_size = 16
         self.lr = 2e-4
         self.num_epochs = 100
@@ -46,9 +53,24 @@ class Config:
         self.noise_level = 5
         self.jpeg_quality = 75
 
+# =============================================================================
+# MODEL DEFINITION
+# =============================================================================
+
 # Enhanced network with more blocks for tiny face recovery
 class RRDBNet_TinyFaces(RRDBNet):
+    """RRDBNet variant with extra refinement layers for tiny-face SR."""
+
     def __init__(self, in_nc, out_nc, nf, nb, gc=32):
+        """Build the network on top of RRDBNet with extra upscaling layers.
+
+        Args:
+            in_nc (int): Input channel count.
+            out_nc (int): Output channel count.
+            nf (int): Number of feature channels.
+            nb (int): Number of RRDB blocks.
+            gc (int): Growth channel inside each dense block.
+        """
         # Call parent constructor with more blocks and features
         super(RRDBNet_TinyFaces, self).__init__(in_nc, out_nc, nf, nb, gc)
         
@@ -57,6 +79,14 @@ class RRDBNet_TinyFaces(RRDBNet):
         self.HRconv2 = nn.Conv2d(nf//2, nf//2, 3, 1, 1, bias=True)
         
     def forward(self, x):
+        """Run a forward pass producing a 4x super-resolved image.
+
+        Args:
+            x (torch.Tensor): LR image batch of shape (N, C, H, W).
+
+        Returns:
+            torch.Tensor: SR image batch of shape (N, C, 4H, 4W).
+        """
         fea = self.conv_first(x)
         trunk = self.trunk_conv(self.RRDB_trunk(fea))
         fea = fea + trunk
@@ -68,9 +98,21 @@ class RRDBNet_TinyFaces(RRDBNet):
         out = self.conv_last(self.lrelu(self.HRconv(fea)))
         return out
 
+# =============================================================================
+# FACE PREPROCESSING / ALIGNMENT
+# =============================================================================
+
 # Helper for annotation parsing
 def parse_wider_face_annotations(annotation_file):
-    """Parse WiderFace annotation file and return a dictionary of image paths to face boxes"""
+    """Parse a WiderFace annotation file into a dict of image -> face boxes.
+
+    Args:
+        annotation_file (str): Path to a ``wider_face_*_bbx_gt.txt`` file.
+
+    Returns:
+        dict[str, list[list[float]]]: Mapping of relative image path to a
+        list of ``[x, y, w, h]`` boxes (only valid faces).
+    """
     annotations = {}
     current_img = None
     face_count = 0
@@ -101,8 +143,14 @@ def parse_wider_face_annotations(annotation_file):
     
     return annotations
 
+# =============================================================================
+# DATASET LOADING
+# =============================================================================
+
 # Dataset with face-aware sampling
 class FaceDataset(Dataset):
+    """WiderFace dataset that samples crops biased toward tiny faces."""
+
     def __init__(self, root_dir, hr_size, scale, train=True, config=None):
         """
         Args:
@@ -154,10 +202,21 @@ class FaceDataset(Dataset):
         print(f"Found {len(self.image_paths)} images with {sum(self.faces_per_image)} faces in {folder} set")
 
     def __len__(self):
+        """Return the number of images with valid annotations."""
         return len(self.image_paths)
     
+    # -------------------------------------------------------------------------
+    # LOW-RESOLUTION IMAGE GENERATION
+    # -------------------------------------------------------------------------
     def apply_realistic_degradation(self, img):
-        """Apply realistic image degradations to simulate real-world LR images"""
+        """Apply blur, noise and JPEG compression to simulate real-world LR.
+
+        Args:
+            img (PIL.Image): Clean low-resolution input image.
+
+        Returns:
+            PIL.Image: Degraded low-resolution image.
+        """
         img_np = np.array(img)
         
         # Apply gaussian blur
@@ -179,6 +238,14 @@ class FaceDataset(Dataset):
         return Image.fromarray(img_np)
 
     def __getitem__(self, idx):
+        """Return one (LR, HR) sample, optionally focused on a tiny face.
+
+        Args:
+            idx (int): Index into ``self.image_paths``.
+
+        Returns:
+            dict: Keys ``lr``/``hr`` (tensors) and ``path`` (str).
+        """
         img_path = self.image_paths[idx]
         
         # Find matching annotation key
@@ -263,9 +330,20 @@ class FaceDataset(Dataset):
             'path': img_path
         }
 
+# =============================================================================
+# MODEL DEFINITION (loss functions and metrics)
+# =============================================================================
+
 # Edge detection for face detail preservation
 class EdgeDetectionLoss(nn.Module):
+    """MSE loss between Sobel edge maps of SR and HR images."""
+
     def __init__(self, device):
+        """Build Sobel kernels on the given device.
+
+        Args:
+            device (torch.device): Device used for the convolution kernels.
+        """
         super(EdgeDetectionLoss, self).__init__()
         self.device = device
         
@@ -276,6 +354,14 @@ class EdgeDetectionLoss(nn.Module):
         self.mse_loss = nn.MSELoss()
     
     def detect_edges(self, x):
+        """Compute the Sobel edge magnitude of an image batch.
+
+        Args:
+            x (torch.Tensor): Image batch (N, C, H, W).
+
+        Returns:
+            torch.Tensor: Edge-magnitude map (N, 1, H, W).
+        """
         # Convert to grayscale by averaging channels
         gray = torch.mean(x, dim=1, keepdim=True)
         
@@ -288,13 +374,29 @@ class EdgeDetectionLoss(nn.Module):
         return edge
     
     def forward(self, sr, hr):
+        """Return MSE between Sobel edge maps of SR and HR.
+
+        Args:
+            sr (torch.Tensor): Super-resolved image batch.
+            hr (torch.Tensor): Ground-truth HR image batch.
+
+        Returns:
+            torch.Tensor: Scalar edge-preservation loss.
+        """
         sr_edges = self.detect_edges(sr)
         hr_edges = self.detect_edges(hr)
         return self.mse_loss(sr_edges, hr_edges)
 
 # Perceptual loss with VGG features
 class PerceptualLoss(nn.Module):
+    """VGG19 feature-space MSE loss between SR and HR images."""
+
     def __init__(self, device):
+        """Load a frozen VGG19 feature extractor on the given device.
+
+        Args:
+            device (torch.device): Device to place the VGG features on.
+        """
         super(PerceptualLoss, self).__init__()
         # Use VGG19 features for perceptual loss - load directly from torchvision
         from torchvision.models import vgg19, VGG19_Weights
@@ -306,6 +408,15 @@ class PerceptualLoss(nn.Module):
         self.device = device
     
     def forward(self, sr, hr):
+        """Compute perceptual MSE loss between SR and HR feature maps.
+
+        Args:
+            sr (torch.Tensor): Super-resolved image batch in [-1, 1].
+            hr (torch.Tensor): Ground-truth HR image batch in [-1, 1].
+
+        Returns:
+            torch.Tensor: Scalar perceptual loss.
+        """
         # Denormalize from [-1,1] to [0,1]
         sr = (sr + 1) / 2
         hr = (hr + 1) / 2
@@ -328,7 +439,15 @@ class PerceptualLoss(nn.Module):
 
 # SSIM calculation for validation
 def calculate_ssim(sr_img, hr_img):
-    """Calculate SSIM between super-resolved and high-resolution images"""
+    """Calculate grayscale SSIM between an SR and HR image.
+
+    Args:
+        sr_img (torch.Tensor | np.ndarray): SR image in [-1, 1] or uint8.
+        hr_img (torch.Tensor | np.ndarray): HR image in [-1, 1] or uint8.
+
+    Returns:
+        float: SSIM score in [0, 1].
+    """
     # Convert from tensor to numpy
     if isinstance(sr_img, torch.Tensor):
         sr_img = (sr_img.permute(1, 2, 0).cpu().numpy() + 1) * 127.5
@@ -343,9 +462,20 @@ def calculate_ssim(sr_img, hr_img):
     
     return ssim(sr_gray, hr_gray, data_range=255)
 
+# =============================================================================
+# TRAINING LOOP
+# =============================================================================
+
 # Enhanced trainer with improved metrics and face-focused training
 class ESRGANTrainer:
+    """Builds the model, datasets and runs the ESRGAN training loop."""
+
     def __init__(self, config):
+        """Initialize the model, optimizer, losses and data loaders.
+
+        Args:
+            config (Config): Training configuration object.
+        """
         self.config = config
         
         # Create output directories
@@ -403,6 +533,10 @@ class ESRGANTrainer:
         )
     
     def train(self):
+        """Run the full training loop, saving checkpoints and samples.
+
+        No inputs. No return value; artifacts are written under ``output/``.
+        """
         best_psnr = 0
         best_ssim = 0
         
@@ -462,6 +596,11 @@ class ESRGANTrainer:
                     self.save_model(epoch + 1, is_best=True, metric="ssim")
     
     def validate(self):
+        """Evaluate the generator on the validation set.
+
+        Returns:
+            tuple[float, float]: ``(mean_psnr_db, mean_ssim)``.
+        """
         self.generator.eval()
         psnr_values = []
         ssim_values = []
@@ -488,7 +627,13 @@ class ESRGANTrainer:
         return sum(psnr_values) / len(psnr_values), sum(ssim_values) / len(ssim_values)
     
     def save_model(self, epoch, is_best=False, metric=None):
-        """Save the model state"""
+        """Save the generator and optimizer state to disk.
+
+        Args:
+            epoch (int): Current epoch number used in the file name.
+            is_best (bool): If True, save under a ``best_model`` filename.
+            metric (str | None): Metric tag (e.g. ``"psnr"``) for best models.
+        """
         if is_best:
             if metric:
                 path = os.path.join(self.config.models_dir, f"best_model_{metric}.pth")
@@ -505,7 +650,11 @@ class ESRGANTrainer:
         print(f"Model saved to {path}")
     
     def save_samples(self, epoch):
-        """Save sample SR images"""
+        """Save LR / HR / SR sample images with PSNR and SSIM in the filename.
+
+        Args:
+            epoch (int): Current epoch number used in the file names.
+        """
         self.generator.eval()
         
         with torch.no_grad():
@@ -543,8 +692,21 @@ class ESRGANTrainer:
             cv2.imwrite(os.path.join(self.config.sample_dir, f"epoch_{epoch}_sr_psnr_{psnr_val:.2f}_ssim_{ssim_val:.4f}.png"), 
                         cv2.cvtColor(sr_img, cv2.COLOR_RGB2BGR))
 
+# =============================================================================
+# INFERENCE / UPSCALING
+# =============================================================================
+
 # Function to upscale all images in a directory
 def upscale_directory(model_path, input_dir, output_dir, scale_factor=4, batch_size=4):
+    """Run the trained generator over every image in a directory.
+
+    Args:
+        model_path (str): Path to a saved checkpoint ``.pth`` file.
+        input_dir (str): Folder of images to upscale (recursive).
+        output_dir (str): Folder where upscaled images will be written.
+        scale_factor (int): Final upscaling factor applied via resize.
+        batch_size (int): Number of images per inference batch.
+    """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
@@ -616,7 +778,16 @@ def upscale_directory(model_path, input_dir, output_dir, scale_factor=4, batch_s
 # Integrate face detection for evaluation
 
 def detect_faces_and_evaluate(model_path, test_dir, annotation_file=None):
-    """Evaluate face detection performance on upscaled images vs original images"""
+    """Compare Haar-cascade face detection on original vs upscaled images.
+
+    Args:
+        model_path (str): Path to the trained ESRGAN checkpoint.
+        test_dir (str): Directory of images to evaluate on.
+        annotation_file (str | None): Optional WiderFace annotation file.
+
+    Returns:
+        dict: Detection counts and improvement percentage.
+    """
     # Create output directory for upscaled images
     upscaled_dir = os.path.join(os.path.dirname(test_dir), "upscaled_test")
     os.makedirs(upscaled_dir, exist_ok=True)
@@ -718,7 +889,16 @@ def detect_faces_and_evaluate(model_path, test_dir, annotation_file=None):
     }
 # Add new function to use a more advanced face detector (MTCNN)
 def evaluate_with_mtcnn(model_path, test_dir, annotation_file=None):
-    """Evaluate using MTCNN face detector which works better for tiny faces"""
+    """Compare MTCNN face detection on original vs upscaled images.
+
+    Args:
+        model_path (str): Path to the trained ESRGAN checkpoint.
+        test_dir (str): Directory of images to evaluate on.
+        annotation_file (str | None): Optional WiderFace annotation file.
+
+    Returns:
+        dict: Detection counts, ground-truth count and improvement percentage.
+    """
     try:
         from facenet_pytorch import MTCNN
         import torch
@@ -879,9 +1059,19 @@ def evaluate_with_mtcnn(model_path, test_dir, annotation_file=None):
         'improvement_percentage': improvement
     }
 
+# =============================================================================
+# TRAINING LOOP (face-focused variant)
+# =============================================================================
+
 # Add a face-focused training method with additional enhancements
 def train_with_face_focus(config):
-    """Train ESRGAN with additional focus on facial features and tiny faces"""
+    """Train ESRGAN with an additional MTCNN-driven face-region loss.
+
+    Args:
+        config (Config): Training configuration object.
+
+    No return value; checkpoints and samples are written to disk.
+    """
     # Initialize trainer
     trainer = ESRGANTrainer(config)
     
@@ -1033,9 +1223,22 @@ def train_with_face_focus(config):
                 best_ssim = avg_ssim
                 trainer.save_model(epoch + 1, is_best=True, metric="ssim")
 
+# =============================================================================
+# INFERENCE / UPSCALING (single image helper)
+# =============================================================================
+
 # Add an inference helper for the model
 def apply_model_to_image(model_path, input_image_path, output_image_path=None):
-    """Apply the trained ESRGAN model to a single image"""
+    """Apply the trained ESRGAN model to a single image.
+
+    Args:
+        model_path (str): Path to the trained checkpoint.
+        input_image_path (str): Path to the input image.
+        output_image_path (str | None): If given, save the SR image here.
+
+    Returns:
+        str | np.ndarray: Output path if saved, otherwise the SR array (RGB).
+    """
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = RRDBNet_TinyFaces(in_nc=3, out_nc=3, nf=64, nb=23, gc=32).to(device)
@@ -1076,6 +1279,10 @@ def apply_model_to_image(model_path, input_image_path, output_image_path=None):
 
 # Main entry point
 def main():
+    """Parse CLI args and dispatch to train / evaluate / upscale modes.
+
+    No inputs; reads from ``sys.argv``. No return value.
+    """
     parser = argparse.ArgumentParser(description="ESRGAN for Tiny Face Enhancement")
     parser.add_argument("--mode", type=str, required=True, choices=["train", "evaluate", "upscale"], 
                         help="Operation mode")
@@ -1129,5 +1336,4 @@ def main():
         upscale_directory(args.model_path, args.input_dir, args.output_dir)
 
 if __name__ == "__main__":
-    import torch.nn.functional as F  # Required import for RRDBNet forward function
     main()

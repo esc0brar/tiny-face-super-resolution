@@ -1,22 +1,29 @@
+# Standard library
+import argparse
+import glob
 import os
+
+# Third-party
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
 from PIL import Image
-import numpy as np
-from RRDBNet_arch import RRDBNet, RRDBNet_TinyFaces
-import glob
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from tqdm import tqdm
-import random
-import argparse
-import cv2
-from torch.nn import functional as F
+
+# Local
+from RRDBNet_arch import RRDBNet, RRDBNet_TinyFaces
 
 # Configuration
 class Config:
+    """Container for training/inference hyperparameters and paths."""
+
     def __init__(self):
+        """Initialize default configuration values (no inputs, no outputs)."""
         self.batch_size = 16
         self.lr = 2e-4
         self.num_epochs = 100
@@ -30,11 +37,25 @@ class Config:
         self.models_dir = os.path.join(self.output_dir, "models")
         self.sample_dir = os.path.join(self.output_dir, "samples")
 
+# =============================================================================
+# DATASET LOADING
+# =============================================================================
+
 # Dataset preparation
 
 # ---------- Fix 1: Face-centric dataset preparation ---------- 
 class FaceDataset(Dataset):
+    """WiderFace dataset that crops around faces and produces (LR, HR) pairs."""
+
     def __init__(self, root_dir, hr_size, scale, train=True):
+        """Load image paths and parse face annotations.
+
+        Args:
+            root_dir (str): Root path to the WiderFace dataset.
+            hr_size (int): Target high-resolution patch size.
+            scale (int): Downsampling factor for low-resolution images.
+            train (bool): If True, load training split; else validation split.
+        """
         self.hr_size = hr_size
         self.lr_size = hr_size // scale
         self.scale = scale
@@ -96,10 +117,21 @@ class FaceDataset(Dataset):
         print(f"Loaded {len(self.valid_indices)} valid images (with annotations)")
 
     def __len__(self):
+        """Return the number of annotated images in the dataset."""
         return len(self.valid_indices)
 
+    # -------------------------------------------------------------------------
+    # LOW-RESOLUTION IMAGE GENERATION
+    # -------------------------------------------------------------------------
     def degrade_image(self, hr_image):
-        """Fix 2: Realistic degradation pipeline"""
+        """Apply blur, downsample, noise and JPEG compression to simulate LR.
+
+        Args:
+            hr_image (PIL.Image): High-resolution input image.
+
+        Returns:
+            PIL.Image: Degraded low-resolution image of size ``lr_size``.
+        """
         # Convert to numpy for OpenCV operations
         hr_np = np.array(hr_image)
         
@@ -121,6 +153,14 @@ class FaceDataset(Dataset):
         return Image.fromarray(lr_np)
 
     def __getitem__(self, idx):
+        """Return one (LR, HR) sample plus the adjusted face box.
+
+        Args:
+            idx (int): Index into the valid sample list.
+
+        Returns:
+            dict: Keys ``lr``/``hr`` (tensors), ``path`` (str), ``boxes`` (list).
+        """
         real_idx = self.valid_indices[idx]  # Map to original index
         img_path = self.image_paths[real_idx]
         hr_image = Image.open(img_path).convert('RGB')
@@ -131,6 +171,9 @@ class FaceDataset(Dataset):
             raise KeyError(f"Annotation missing for image: {key}")
 
     
+        # ---------------------------------------------------------------------
+        # FACE PREPROCESSING / ALIGNMENT
+        # ---------------------------------------------------------------------
         # Initialize default box (full image coordinates)
         adjusted_box = [0, 0, self.hr_size, self.hr_size]  # Directly use HR size as fallback
     
@@ -187,9 +230,20 @@ class FaceDataset(Dataset):
             'boxes': [adjusted_box]  # Wrap in list for batch compatibility
         }
 
+# =============================================================================
+# MODEL DEFINITION (loss functions)
+# =============================================================================
+
 # Loss functions
 class PerceptualLoss(nn.Module):
+    """VGG19 feature-space MSE loss between SR and HR images."""
+
     def __init__(self, device):
+        """Load a frozen VGG19 feature extractor on the given device.
+
+        Args:
+            device (torch.device): Device to place the VGG features on.
+        """
         super(PerceptualLoss, self).__init__()
         # Use VGG19 features for perceptual loss - load directly from torchvision
         from torchvision.models import vgg19, VGG19_Weights
@@ -201,6 +255,15 @@ class PerceptualLoss(nn.Module):
         self.device = device
     
     def forward(self, sr, hr):
+        """Compute perceptual MSE loss between SR and HR feature maps.
+
+        Args:
+            sr (torch.Tensor): Super-resolved image batch in [-1, 1].
+            hr (torch.Tensor): Ground-truth HR image batch in [-1, 1].
+
+        Returns:
+            torch.Tensor: Scalar perceptual loss.
+        """
         # Denormalize from [-1,1] to [0,1]
         sr = (sr + 1) / 2
         hr = (hr + 1) / 2
@@ -221,9 +284,20 @@ class PerceptualLoss(nn.Module):
         
         return self.mse_loss(sr_features, hr_features)
 
+# =============================================================================
+# TRAINING LOOP
+# =============================================================================
+
 # Trainer class
 class ESRGANTrainer:
+    """Builds the generator, datasets and runs the ESRGAN training loop."""
+
     def __init__(self, config):
+        """Initialize the model, optimizer, losses and data loaders.
+
+        Args:
+            config (Config): Training configuration object.
+        """
         self.config = config
         
         # Create output directories
@@ -278,6 +352,10 @@ class ESRGANTrainer:
         )
     
     def train(self):
+        """Run the full training loop, validating and saving periodically.
+
+        No inputs. No return value; checkpoints and samples are written to disk.
+        """
         best_psnr = 0
         
         for epoch in range(self.config.num_epochs):
@@ -324,6 +402,11 @@ class ESRGANTrainer:
                     self.save_model(epoch + 1, is_best=True)
     
     def validate(self):
+        """Evaluate the generator on the validation set.
+
+        Returns:
+            float: Mean PSNR (dB) over the validation images.
+        """
         self.generator.eval()
         psnr_values = []
         ssim_values = []
@@ -375,12 +458,30 @@ class ESRGANTrainer:
         return metrics['psnr']
 
     def calculate_ssim(self, hr, sr):
+        """Compute SSIM between two image tensors in [0, 1].
+
+        Args:
+            hr (torch.Tensor): HR image tensor (C, H, W).
+            sr (torch.Tensor): SR image tensor (C, H, W).
+
+        Returns:
+            float: SSIM score.
+        """
         # Implement SSIM calculation
         from torchmetrics.image import StructuralSimilarityIndexMeasure
         ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         return ssim(sr.unsqueeze(0), hr.unsqueeze(0)).item()
 
     def calculate_edge_loss(self, hr, sr):
+        """Compute L1 loss between Sobel edge magnitudes of HR and SR.
+
+        Args:
+            hr (torch.Tensor): HR image tensor (C, H, W).
+            sr (torch.Tensor): SR image tensor (C, H, W).
+
+        Returns:
+            float: Edge-preservation L1 loss.
+        """
         # Sobel edge detection
         sobel_x = torch.tensor([[[[1, 0, -1], [2, 0, -2], [1, 0, -1]]]], dtype=torch.float32)
         sobel_y = torch.tensor([[[[1, 2, 1], [0, 0, 0], [-1, -2, -1]]]], dtype=torch.float32)
@@ -396,7 +497,12 @@ class ESRGANTrainer:
         return F.l1_loss(sr_edges, hr_edges).item()
     
     def save_model(self, epoch, is_best=False):
-        """Save the model state"""
+        """Save the generator and optimizer state to disk.
+
+        Args:
+            epoch (int): Current epoch number used in the file name.
+            is_best (bool): If True, save under ``best_model.pth``.
+        """
         if is_best:
             path = os.path.join(self.config.models_dir, f"best_model.pth")
         else:
@@ -410,7 +516,11 @@ class ESRGANTrainer:
         print(f"Model saved to {path}")
     
     def save_samples(self, epoch):
-        """Save sample SR images"""
+        """Generate and save LR/HR/SR sample images for visual inspection.
+
+        Args:
+            epoch (int): Current epoch number used in the file names.
+        """
         self.generator.eval()
         
         with torch.no_grad():
@@ -437,8 +547,21 @@ class ESRGANTrainer:
             cv2.imwrite(os.path.join(self.config.sample_dir, f"epoch_{epoch}_hr.png"), cv2.cvtColor(hr_img, cv2.COLOR_RGB2BGR))
             cv2.imwrite(os.path.join(self.config.sample_dir, f"epoch_{epoch}_sr.png"), cv2.cvtColor(sr_img, cv2.COLOR_RGB2BGR))
 
+# =============================================================================
+# INFERENCE / UPSCALING
+# =============================================================================
+
 # Function to upscale all images in a directory
 def upscale_directory(model_path, input_dir, output_dir, scale_factor=4, batch_size=4):
+    """Run the trained generator over every image in a directory.
+
+    Args:
+        model_path (str): Path to a saved checkpoint ``.pth`` file.
+        input_dir (str): Folder of images to upscale (recursive).
+        output_dir (str): Folder where upscaled images will be written.
+        scale_factor (int): Final upscaling factor applied via resize.
+        batch_size (int): Number of images per inference batch.
+    """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     

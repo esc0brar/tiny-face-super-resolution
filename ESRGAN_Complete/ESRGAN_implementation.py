@@ -1,21 +1,29 @@
+# Standard library
+import argparse
+import glob
 import os
+import random
+
+# Third-party
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
 from PIL import Image
-import numpy as np
-from RRDBNet_arch import RRDBNet
-import glob
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from tqdm import tqdm
-import random
-import argparse
-import cv2
+
+# Local
+from RRDBNet_arch import RRDBNet
 
 # Configuration
 class Config:
+    """Container for training/inference hyperparameters and paths."""
+
     def __init__(self):
+        """Initialize default configuration values (no inputs, no outputs)."""
         self.batch_size = 16
         self.lr = 2e-4
         self.num_epochs = 100
@@ -29,10 +37,17 @@ class Config:
         self.models_dir = os.path.join(self.output_dir, "models")
         self.sample_dir = os.path.join(self.output_dir, "samples")
 
+# =============================================================================
+# DATASET LOADING
+# =============================================================================
+
 # Dataset preparation
 class FaceDataset(Dataset):
+    """WiderFace dataset that yields (LR, HR) image pairs via random crops."""
+
     def __init__(self, root_dir, hr_size, scale, train=True):
-        """
+        """Index every image in the chosen WiderFace split.
+
         Args:
             root_dir (string): Directory with the Wider Face dataset
             hr_size (int): Size of high-resolution output patches
@@ -63,9 +78,18 @@ class FaceDataset(Dataset):
         print(f"Found {len(self.image_paths)} images in {folder} set")
 
     def __len__(self):
+        """Return the number of indexed images."""
         return len(self.image_paths)
 
     def __getitem__(self, idx):
+        """Return one (LR, HR) image pair from a random crop.
+
+        Args:
+            idx (int): Index into ``self.image_paths``.
+
+        Returns:
+            dict: Keys ``lr``/``hr`` (tensors) and ``path`` (str).
+        """
         img_path = self.image_paths[idx]
         
         # Read the image
@@ -84,6 +108,9 @@ class FaceDataset(Dataset):
         top = random.randint(0, hr_image.height - self.hr_size)
         hr_image = hr_image.crop((left, top, left + self.hr_size, top + self.hr_size))
         
+        # ---------------------------------------------------------------------
+        # LOW-RESOLUTION IMAGE GENERATION
+        # ---------------------------------------------------------------------
         # Create LR image through downsampling
         lr_image = hr_image.resize((self.lr_size, self.lr_size), Image.BICUBIC)
         
@@ -93,9 +120,20 @@ class FaceDataset(Dataset):
         
         return {'lr': lr_tensor, 'hr': hr_tensor, 'path': img_path}
 
+# =============================================================================
+# MODEL DEFINITION (loss functions)
+# =============================================================================
+
 # Loss functions
 class PerceptualLoss(nn.Module):
+    """VGG19 feature-space MSE loss between SR and HR images."""
+
     def __init__(self, device):
+        """Load a frozen VGG19 feature extractor on the given device.
+
+        Args:
+            device (torch.device): Device to place the VGG features on.
+        """
         super(PerceptualLoss, self).__init__()
         # Use VGG19 features for perceptual loss - load directly from torchvision
         from torchvision.models import vgg19, VGG19_Weights
@@ -107,6 +145,15 @@ class PerceptualLoss(nn.Module):
         self.device = device
     
     def forward(self, sr, hr):
+        """Compute perceptual MSE loss between SR and HR feature maps.
+
+        Args:
+            sr (torch.Tensor): Super-resolved image batch in [-1, 1].
+            hr (torch.Tensor): Ground-truth HR image batch in [-1, 1].
+
+        Returns:
+            torch.Tensor: Scalar perceptual loss.
+        """
         # Denormalize from [-1,1] to [0,1]
         sr = (sr + 1) / 2
         hr = (hr + 1) / 2
@@ -127,9 +174,20 @@ class PerceptualLoss(nn.Module):
         
         return self.mse_loss(sr_features, hr_features)
 
+# =============================================================================
+# TRAINING LOOP
+# =============================================================================
+
 # Trainer class
 class ESRGANTrainer:
+    """Builds the model, datasets and runs the ESRGAN training loop."""
+
     def __init__(self, config):
+        """Initialize the model, optimizer, losses and data loaders.
+
+        Args:
+            config (Config): Training configuration object.
+        """
         self.config = config
         
         # Create output directories
@@ -184,6 +242,10 @@ class ESRGANTrainer:
         )
     
     def train(self):
+        """Run the full training loop, validating and saving periodically.
+
+        No inputs. No return value; checkpoints and samples are written to disk.
+        """
         best_psnr = 0
         
         for epoch in range(self.config.num_epochs):
@@ -230,6 +292,11 @@ class ESRGANTrainer:
                     self.save_model(epoch + 1, is_best=True)
     
     def validate(self):
+        """Evaluate the generator on the validation set.
+
+        Returns:
+            float: Mean PSNR (dB) over the validation images.
+        """
         self.generator.eval()
         psnr_values = []
         
@@ -251,7 +318,12 @@ class ESRGANTrainer:
         return sum(psnr_values) / len(psnr_values)
     
     def save_model(self, epoch, is_best=False):
-        """Save the model state"""
+        """Save the generator and optimizer state to disk.
+
+        Args:
+            epoch (int): Current epoch number used in the file name.
+            is_best (bool): If True, save under ``best_model.pth``.
+        """
         if is_best:
             path = os.path.join(self.config.models_dir, f"best_model.pth")
         else:
@@ -265,7 +337,11 @@ class ESRGANTrainer:
         print(f"Model saved to {path}")
     
     def save_samples(self, epoch):
-        """Save sample SR images"""
+        """Generate and save LR/HR/SR sample images for visual inspection.
+
+        Args:
+            epoch (int): Current epoch number used in the file names.
+        """
         self.generator.eval()
         
         with torch.no_grad():
@@ -292,8 +368,21 @@ class ESRGANTrainer:
             cv2.imwrite(os.path.join(self.config.sample_dir, f"epoch_{epoch}_hr.png"), cv2.cvtColor(hr_img, cv2.COLOR_RGB2BGR))
             cv2.imwrite(os.path.join(self.config.sample_dir, f"epoch_{epoch}_sr.png"), cv2.cvtColor(sr_img, cv2.COLOR_RGB2BGR))
 
+# =============================================================================
+# INFERENCE / UPSCALING
+# =============================================================================
+
 # Function to upscale all images in a directory
 def upscale_directory(model_path, input_dir, output_dir, scale_factor=4, batch_size=4):
+    """Run the trained generator over every image in a directory.
+
+    Args:
+        model_path (str): Path to a saved checkpoint ``.pth`` file.
+        input_dir (str): Folder of images to upscale (recursive).
+        output_dir (str): Folder where upscaled images will be written.
+        scale_factor (int): Final upscaling factor applied via resize.
+        batch_size (int): Number of images per inference batch.
+    """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     

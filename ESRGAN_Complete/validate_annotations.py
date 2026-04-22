@@ -1,4 +1,9 @@
 # validate_widerface_annotations.py
+
+# =============================================================================
+# FACE PREPROCESSING / ALIGNMENT (annotation validation)
+# =============================================================================
+
 annotation_path = "C:\\coding\\transformer\\ESRGAN_Complete\\wider_face\\wider_face_split\\wider_face_train_bbx_gt.txt"
 
 with open(annotation_path, "r") as f:

@@ -12,12 +12,12 @@ The implementation follows a two-stage approach:
 
 The model enhances low-resolution images by reconstructing finer details and improving overall sharpness.
 
-| Input -> Output |
-|------|--------|
-| ![](results\res_1.jpeg) |
-| ![](results\res_2.jpeg) |
-| ![](results\res_3.jpeg) |
-| ![](results\res_4.jpeg) |
+| Progressive Enhancement |
+|-------------------------|
+| ![](results/res_1.jpeg) |
+| ![](results/res_2.jpeg) |
+| ![](results/res_3.jpeg) |
+| ![](results/res_4.jpeg) |
 
 *Left: low-resolution input | Right: ESRGAN enhanced output*
 

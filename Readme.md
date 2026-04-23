@@ -8,6 +8,19 @@ The implementation follows a two-stage approach:
 1. **Training Phase**: The model is trained using pairs of low-resolution (LR) and high-resolution (HR) images from the Wider Face dataset
 2. **Upscaling Phase**: The trained model is used to upscale images to 4x their original resolution
 
+## Results
+
+The model enhances low-resolution images by reconstructing finer details and improving overall sharpness.
+
+| Input -> Output |
+|------|--------|
+| ![](results\res_1.jpeg) |
+| ![](results\res_2.jpeg) |
+| ![](results\res_3.jpeg) |
+| ![](results\res_4.jpeg) |
+
+*Left: low-resolution input | Right: ESRGAN enhanced output*
+
 ## My Contributions
 - Designed and implemented the low-resolution data generation pipeline for training
 - Developed dataset loading pipeline for handling paired low- and high-resolution images  

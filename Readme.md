@@ -12,14 +12,19 @@ The implementation follows a two-stage approach:
 
 The model enhances low-resolution images by reconstructing finer details and improving overall sharpness.
 
-| Progressive Enhancement |
-|-------------------------|
-| ![](results/res_1.jpeg) |
-| ![](results/res_2.jpeg) |
-| ![](results/res_3.jpeg) |
-| ![](results/res_4.jpeg) |
+### Example 1
+![](results/res_1.jpeg)
 
-*Left: low-resolution input | Right: ESRGAN enhanced output*
+### Example 2
+![](results/res_2.jpeg)
+
+### Example 3
+![](results/res_3.jpeg)
+
+### Example 4
+![](results/res_4.jpeg)
+
+*Each image shows progressive enhancement from left (low-resolution input) to right (final ESRGAN output)*
 
 ## My Contributions
 - Designed and implemented the low-resolution data generation pipeline for training
